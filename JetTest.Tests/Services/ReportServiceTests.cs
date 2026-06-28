@@ -1,182 +1,134 @@
 using FluentAssertions;
 using JetTest.BL.Services;
-using JetTest.DAL.Repositories;
-using JetTest.Data;
-using JetTest.Models;
+using JetTest.DAL.Interfaces;
+using JetTest.DAL.Reports;
+using JetTest.DTOs.Reports;
 using JetTest.Models.Enums;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Moq;
 
 namespace JetTest.Tests.Services;
 
+// Note: ReportRepository uses raw SQL (ROW_NUMBER, LAG, DATEDIFF) which cannot run against
+// the EF in-memory provider. These tests mock IReportRepository and verify that ReportService
+// correctly assembles DTOs from the pre-aggregated rows the repository returns.
+// SQL correctness is validated end-to-end against a real SQL Server instance.
 public class ReportServiceTests
 {
-    private readonly AppDbContext _context;
+    private readonly Mock<IReportRepository> _repoMock = new();
     private readonly ReportService _sut;
 
     public ReportServiceTests()
     {
-        var options = new DbContextOptionsBuilder<AppDbContext>()
-            .UseInMemoryDatabase(Guid.NewGuid().ToString())
-            .Options;
-        _context = new AppDbContext(options);
-
-        // Real repository over the in-memory context, mocked logger.
-        var repo = new ReportRepository(_context);
-        _sut = new ReportService(repo, new Mock<ILogger<ReportService>>().Object);
+        _sut = new ReportService(_repoMock.Object, new Mock<ILogger<ReportService>>().Object);
     }
 
-    // ---------- Top dishes ----------
-
-    private void SeedDishData()
-    {
-        _context.Restaurants.AddRange(
-            new Restaurant { Id = 1, Name = "Bistro" },
-            new Restaurant { Id = 2, Name = "Cafe" });
-
-        _context.Categories.AddRange(
-            new Category { Id = 1, Name = "Mains" },
-            new Category { Id = 2, Name = "Desserts" });
-
-        _context.Dishes.AddRange(
-            new Dish { Id = 1, Name = "Pizza", CategoryId = 1, RestaurantId = 1, Price = 40m },
-            new Dish { Id = 2, Name = "Burger", CategoryId = 1, RestaurantId = 1, Price = 35m },
-            new Dish { Id = 3, Name = "Cake", CategoryId = 2, RestaurantId = 1, Price = 20m },
-            new Dish { Id = 4, Name = "Salad", CategoryId = 1, RestaurantId = 2, Price = 25m });
-
-        // R1 orders
-        _context.Orders.Add(new Order { Id = 1, CustomerId = 1, RestaurantId = 1, DeliveryAddress = "a" });
-        _context.Orders.Add(new Order { Id = 2, CustomerId = 1, RestaurantId = 1, DeliveryAddress = "b" });
-        // R2 order
-        _context.Orders.Add(new Order { Id = 3, CustomerId = 1, RestaurantId = 2, DeliveryAddress = "c" });
-
-        _context.OrderItems.AddRange(
-            new OrderItem { Id = 1, OrderId = 1, DishId = 1, Quantity = 5, UnitPrice = 40m }, // Pizza
-            new OrderItem { Id = 2, OrderId = 1, DishId = 2, Quantity = 2, UnitPrice = 35m }, // Burger
-            new OrderItem { Id = 3, OrderId = 1, DishId = 3, Quantity = 3, UnitPrice = 20m }, // Cake
-            new OrderItem { Id = 4, OrderId = 2, DishId = 1, Quantity = 1, UnitPrice = 40m }, // Pizza
-            new OrderItem { Id = 5, OrderId = 2, DishId = 3, Quantity = 1, UnitPrice = 20m }, // Cake
-            new OrderItem { Id = 6, OrderId = 3, DishId = 4, Quantity = 10, UnitPrice = 25m }); // Salad (R2)
-
-        _context.SaveChanges();
-    }
+    // ── Top dishes ────────────────────────────────────────────────────────────
 
     [Fact]
-    public async Task TopDishes_FilteredByRestaurant_RanksByQuantityWithinCategory()
+    public async Task TopDishes_GroupsByCategory_MapsToDto()
     {
-        SeedDishData();
+        // Simulate what SQL returns after ROW_NUMBER filtering — already the top rows.
+        _repoMock.Setup(r => r.GetTopDishesRankedAsync(null, 5))
+            .ReturnsAsync(new List<DishAggregateRow>
+            {
+                new() { CategoryId = 1, CategoryName = "Mains",    DishId = 10, DishName = "Pizza",  TotalQuantity = 6, OrderCount = 3 },
+                new() { CategoryId = 1, CategoryName = "Mains",    DishId = 11, DishName = "Burger", TotalQuantity = 2, OrderCount = 1 },
+                new() { CategoryId = 2, CategoryName = "Desserts", DishId = 20, DishName = "Cake",   TotalQuantity = 4, OrderCount = 2 },
+            });
 
-        var result = (await _sut.GetTopDishesPerCategoryAsync(restaurantId: 1, topN: 5)).ToList();
+        var result = (await _sut.GetTopDishesPerCategoryAsync(null, 5)).ToList();
 
-        result.Should().HaveCount(2); // Mains + Desserts
+        result.Should().HaveCount(2);
 
         var mains = result.Single(c => c.CategoryName == "Mains");
-        mains.Dishes.Select(d => d.DishName).Should().ContainInOrder("Pizza", "Burger");
-        mains.Dishes.First().TotalQuantity.Should().Be(6); // Pizza 5 + 1
+        mains.Dishes.Should().HaveCount(2);
+        mains.Dishes[0].DishName.Should().Be("Pizza");
+        mains.Dishes[0].TotalQuantity.Should().Be(6);
 
         var desserts = result.Single(c => c.CategoryName == "Desserts");
-        desserts.Dishes.Should().ContainSingle();
-        desserts.Dishes[0].DishName.Should().Be("Cake");
-        desserts.Dishes[0].TotalQuantity.Should().Be(4); // Cake 3 + 1
+        desserts.Dishes.Should().ContainSingle().Which.DishName.Should().Be("Cake");
     }
 
     [Fact]
-    public async Task TopDishes_RespectsTopN()
+    public async Task TopDishes_PassesTopNToRepository()
     {
-        SeedDishData();
+        _repoMock.Setup(r => r.GetTopDishesRankedAsync(1, 3))
+            .ReturnsAsync(new List<DishAggregateRow>
+            {
+                new() { CategoryId = 1, CategoryName = "Mains", DishId = 10, DishName = "Pizza", TotalQuantity = 6, OrderCount = 3 },
+            });
 
-        var result = (await _sut.GetTopDishesPerCategoryAsync(restaurantId: 1, topN: 1)).ToList();
+        await _sut.GetTopDishesPerCategoryAsync(restaurantId: 1, topN: 3);
 
-        var mains = result.Single(c => c.CategoryName == "Mains");
-        mains.Dishes.Should().ContainSingle();
-        mains.Dishes[0].DishName.Should().Be("Pizza");
+        _repoMock.Verify(r => r.GetTopDishesRankedAsync(1, 3), Times.Once);
     }
 
     [Fact]
-    public async Task TopDishes_AllRestaurants_AggregatesAcrossRestaurants()
+    public async Task TopDishes_ClampsTopNToMinimumOne()
     {
-        SeedDishData();
+        _repoMock.Setup(r => r.GetTopDishesRankedAsync(null, 1)).ReturnsAsync(new List<DishAggregateRow>());
 
-        var result = (await _sut.GetTopDishesPerCategoryAsync(restaurantId: null, topN: 1)).ToList();
+        await _sut.GetTopDishesPerCategoryAsync(null, topN: 0);
 
-        // Across all restaurants the top Main is Salad (qty 10) over Pizza (qty 6).
-        var mains = result.Single(c => c.CategoryName == "Mains");
-        mains.Dishes[0].DishName.Should().Be("Salad");
-        mains.Dishes[0].TotalQuantity.Should().Be(10);
+        // topN 0 is clamped to 1 before being forwarded to the repo
+        _repoMock.Verify(r => r.GetTopDishesRankedAsync(null, 1), Times.Once);
     }
 
     [Fact]
     public async Task TopDishes_NoData_ReturnsEmpty()
     {
+        _repoMock.Setup(r => r.GetTopDishesRankedAsync(null, 5)).ReturnsAsync(new List<DishAggregateRow>());
+
         var result = await _sut.GetTopDishesPerCategoryAsync(null, 5);
+
         result.Should().BeEmpty();
     }
 
-    // ---------- Delivery efficiency ----------
-
-    private void SeedDeliveryData()
-    {
-        _context.Restaurants.AddRange(
-            new Restaurant { Id = 1, Name = "Bistro" },
-            new Restaurant { Id = 2, Name = "Cafe" });
-
-        var o1Created = new DateTime(2026, 1, 1, 10, 0, 0, DateTimeKind.Utc);
-        var o2Created = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
-        var o3Created = new DateTime(2026, 1, 1, 9, 0, 0, DateTimeKind.Utc);
-
-        _context.Orders.AddRange(
-            new Order { Id = 1, CustomerId = 1, RestaurantId = 1, DeliveryAddress = "a", CreatedAt = o1Created },
-            new Order { Id = 2, CustomerId = 1, RestaurantId = 1, DeliveryAddress = "b", CreatedAt = o2Created },
-            new Order { Id = 3, CustomerId = 1, RestaurantId = 2, DeliveryAddress = "c", CreatedAt = o3Created });
-
-        // O1 (R1): Placed 10m, Accepted 20m, Preparing 30m, overall 60m
-        _context.OrderStatusHistories.AddRange(
-            new OrderStatusHistory { Id = 1, OrderId = 1, OldStatus = OrderStatus.Placed, NewStatus = OrderStatus.Accepted, ChangedAt = o1Created.AddMinutes(10) },
-            new OrderStatusHistory { Id = 2, OrderId = 1, OldStatus = OrderStatus.Accepted, NewStatus = OrderStatus.Preparing, ChangedAt = o1Created.AddMinutes(30) },
-            new OrderStatusHistory { Id = 3, OrderId = 1, OldStatus = OrderStatus.Preparing, NewStatus = OrderStatus.Delivered, ChangedAt = o1Created.AddMinutes(60) });
-
-        // O2 (R1): Placed 20m, Accepted 30m, Preparing 50m, overall 100m
-        _context.OrderStatusHistories.AddRange(
-            new OrderStatusHistory { Id = 4, OrderId = 2, OldStatus = OrderStatus.Placed, NewStatus = OrderStatus.Accepted, ChangedAt = o2Created.AddMinutes(20) },
-            new OrderStatusHistory { Id = 5, OrderId = 2, OldStatus = OrderStatus.Accepted, NewStatus = OrderStatus.Preparing, ChangedAt = o2Created.AddMinutes(50) },
-            new OrderStatusHistory { Id = 6, OrderId = 2, OldStatus = OrderStatus.Preparing, NewStatus = OrderStatus.Delivered, ChangedAt = o2Created.AddMinutes(100) });
-
-        // O3 (R2): Placed 5m, Accepted 30m, overall 35m
-        _context.OrderStatusHistories.AddRange(
-            new OrderStatusHistory { Id = 7, OrderId = 3, OldStatus = OrderStatus.Placed, NewStatus = OrderStatus.Accepted, ChangedAt = o3Created.AddMinutes(5) },
-            new OrderStatusHistory { Id = 8, OrderId = 3, OldStatus = OrderStatus.Accepted, NewStatus = OrderStatus.Delivered, ChangedAt = o3Created.AddMinutes(35) });
-
-        _context.SaveChanges();
-    }
+    // ── Delivery efficiency ───────────────────────────────────────────────────
 
     [Fact]
-    public async Task DeliveryEfficiency_ComputesPerTransitionAndOverallAverages()
+    public async Task DeliveryEfficiency_MapsSegmentRowsToDtos()
     {
-        SeedDeliveryData();
+        // Simulate SQL output: restaurant R1 has two transitions; AvgOverall repeats on each row.
+        _repoMock.Setup(r => r.GetDeliverySegmentsAsync(null))
+            .ReturnsAsync(new List<DeliverySegmentRow>
+            {
+                new() { RestaurantId = 1, RestaurantName = "Bistro",
+                        OldStatus = (int)OrderStatus.Placed,   NewStatus = (int)OrderStatus.Accepted,
+                        AvgSegmentMinutes = 15, AvgOverallMinutes = 80, DeliveredCount = 2 },
+                new() { RestaurantId = 1, RestaurantName = "Bistro",
+                        OldStatus = (int)OrderStatus.Accepted, NewStatus = (int)OrderStatus.Delivered,
+                        AvgSegmentMinutes = 65, AvgOverallMinutes = 80, DeliveredCount = 2 },
+            });
 
-        var result = (await _sut.GetDeliveryEfficiencyAsync(restaurantId: 1)).ToList();
+        var result = (await _sut.GetDeliveryEfficiencyAsync(null)).ToList();
 
         result.Should().ContainSingle();
         var r1 = result[0];
         r1.RestaurantName.Should().Be("Bistro");
         r1.DeliveredOrdersCount.Should().Be(2);
-        r1.AverageOverallMinutes.Should().Be(80); // (60 + 100) / 2
+        r1.AverageOverallMinutes.Should().Be(80);
+        r1.TransitionAverages.Should().HaveCount(2);
 
-        var placedToAccepted = r1.TransitionAverages.Single(t => t.FromStatus == OrderStatus.Placed && t.ToStatus == OrderStatus.Accepted);
-        placedToAccepted.AverageMinutes.Should().Be(15); // (10 + 20) / 2
-
-        var acceptedToPreparing = r1.TransitionAverages.Single(t => t.FromStatus == OrderStatus.Accepted && t.ToStatus == OrderStatus.Preparing);
-        acceptedToPreparing.AverageMinutes.Should().Be(25); // (20 + 30) / 2
-
-        var preparingToDelivered = r1.TransitionAverages.Single(t => t.FromStatus == OrderStatus.Preparing && t.ToStatus == OrderStatus.Delivered);
-        preparingToDelivered.AverageMinutes.Should().Be(40); // (30 + 50) / 2
+        var placedToAccepted = r1.TransitionAverages
+            .Single(t => t.FromStatus == OrderStatus.Placed && t.ToStatus == OrderStatus.Accepted);
+        placedToAccepted.AverageMinutes.Should().Be(15);
     }
 
     [Fact]
-    public async Task DeliveryEfficiency_AllRestaurants_ReturnsEachRestaurant()
+    public async Task DeliveryEfficiency_MultipleRestaurants_GroupedSeparately()
     {
-        SeedDeliveryData();
+        _repoMock.Setup(r => r.GetDeliverySegmentsAsync(null))
+            .ReturnsAsync(new List<DeliverySegmentRow>
+            {
+                new() { RestaurantId = 1, RestaurantName = "Bistro",
+                        OldStatus = (int)OrderStatus.Placed, NewStatus = (int)OrderStatus.Delivered,
+                        AvgSegmentMinutes = 60, AvgOverallMinutes = 60, DeliveredCount = 1 },
+                new() { RestaurantId = 2, RestaurantName = "Cafe",
+                        OldStatus = (int)OrderStatus.Placed, NewStatus = (int)OrderStatus.Delivered,
+                        AvgSegmentMinutes = 35, AvgOverallMinutes = 35, DeliveredCount = 1 },
+            });
 
         var result = (await _sut.GetDeliveryEfficiencyAsync(null)).ToList();
 
@@ -185,9 +137,22 @@ public class ReportServiceTests
     }
 
     [Fact]
+    public async Task DeliveryEfficiency_PassesRestaurantIdFilterToRepository()
+    {
+        _repoMock.Setup(r => r.GetDeliverySegmentsAsync(7)).ReturnsAsync(new List<DeliverySegmentRow>());
+
+        await _sut.GetDeliveryEfficiencyAsync(restaurantId: 7);
+
+        _repoMock.Verify(r => r.GetDeliverySegmentsAsync(7), Times.Once);
+    }
+
+    [Fact]
     public async Task DeliveryEfficiency_NoData_ReturnsEmpty()
     {
+        _repoMock.Setup(r => r.GetDeliverySegmentsAsync(null)).ReturnsAsync(new List<DeliverySegmentRow>());
+
         var result = await _sut.GetDeliveryEfficiencyAsync(null);
+
         result.Should().BeEmpty();
     }
 }
