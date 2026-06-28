@@ -54,75 +54,54 @@ public class ReportRepository : IReportRepository
     }
 
     /// <summary>
-    /// Four CTEs:
-    ///   DeliveredOrders  — identifies delivered orders and computes overall delivery minutes
-    ///                      (CreatedAt → Delivered timestamp) per order.
-    ///   RestaurantOverall — aggregates overall minutes to restaurant level (AVG, COUNT).
-    ///   SegmentDurations  — uses LAG() OVER (PARTITION BY OrderId ORDER BY ChangedAt) to get
-    ///                       the previous event timestamp; DATEDIFF gives segment minutes.
-    ///                       COALESCE falls back to Order.CreatedAt for the first transition.
-    ///   TransitionAverages — averages segment minutes by (restaurant × OldStatus × NewStatus).
+    /// Single CTE using two window functions side-by-side:
+    ///   LAG(ChangedAt) OVER (PARTITION BY OrderId ORDER BY ChangedAt)
+    ///     → previous event time; COALESCE to Order.CreatedAt for the first transition.
+    ///   MAX(CASE WHEN NewStatus = 5 THEN DATEDIFF(...) END) OVER (PARTITION BY OrderId)
+    ///     → propagates overall delivery minutes onto every row of the same order;
+    ///       NULL for non-delivered orders, which the outer WHERE filters out.
     ///
-    /// Final SELECT joins TransitionAverages with RestaurantOverall so each transition row
-    /// carries the restaurant-level overall average — the service reads it from any row in the group.
+    /// A single GROUP BY then averages both per (restaurant × transition).
+    /// The service reads AvgOverallMinutes and DeliveredCount from the Placed row (OldStatus = 0)
+    /// of each restaurant group — that row represents all delivered orders.
     /// </summary>
     public async Task<IEnumerable<DeliverySegmentRow>> GetDeliverySegmentsAsync(int? restaurantId)
     {
         return await _context.Database
             .SqlQuery<DeliverySegmentRow>($"""
-                WITH DeliveredOrders AS (
-                    SELECT h.OrderId,
-                           o.RestaurantId,
-                           DATEDIFF(MINUTE, o.CreatedAt, h.ChangedAt) AS OverallMinutes
+                WITH Segments AS (
+                    SELECT
+                        h.OrderId,
+                        o.RestaurantId,
+                        r.Name                          AS RestaurantName,
+                        h.OldStatus,
+                        h.NewStatus,
+                        DATEDIFF(MINUTE,
+                            COALESCE(
+                                LAG(h.ChangedAt) OVER (PARTITION BY h.OrderId ORDER BY h.ChangedAt),
+                                o.CreatedAt
+                            ),
+                            h.ChangedAt)                AS SegmentMinutes,
+                        MAX(CASE WHEN h.NewStatus = 5
+                                 THEN DATEDIFF(MINUTE, o.CreatedAt, h.ChangedAt)
+                            END) OVER (PARTITION BY h.OrderId) AS OverallMinutes
                     FROM   OrderStatusHistories h
-                    INNER JOIN Orders o ON o.Id = h.OrderId
-                    WHERE  h.NewStatus = 5   -- OrderStatus.Delivered
-                      AND  ({restaurantId} IS NULL OR o.RestaurantId = {restaurantId})
-                ),
-                RestaurantOverall AS (
-                    SELECT RestaurantId,
-                           AVG(CAST(OverallMinutes AS FLOAT)) AS AvgOverallMinutes,
-                           COUNT(*)                           AS DeliveredCount
-                    FROM   DeliveredOrders
-                    GROUP BY RestaurantId
-                ),
-                SegmentDurations AS (
-                    SELECT h.OrderId,
-                           o.RestaurantId,
-                           r.Name AS RestaurantName,
-                           h.OldStatus,
-                           h.NewStatus,
-                           DATEDIFF(MINUTE,
-                               COALESCE(
-                                   LAG(h.ChangedAt) OVER (PARTITION BY h.OrderId ORDER BY h.ChangedAt),
-                                   o.CreatedAt      -- first transition: measure from order creation
-                               ),
-                               h.ChangedAt
-                           ) AS SegmentMinutes
-                    FROM   OrderStatusHistories h
-                    INNER JOIN Orders      o  ON o.Id = h.OrderId
-                    INNER JOIN Restaurants r  ON r.Id = o.RestaurantId
-                    INNER JOIN DeliveredOrders d ON d.OrderId = h.OrderId
-                ),
-                TransitionAverages AS (
-                    SELECT RestaurantId,
-                           MAX(RestaurantName)               AS RestaurantName,
-                           OldStatus,
-                           NewStatus,
-                           AVG(CAST(SegmentMinutes AS FLOAT)) AS AvgSegmentMinutes
-                    FROM   SegmentDurations
-                    GROUP BY RestaurantId, OldStatus, NewStatus
+                    INNER JOIN Orders      o ON o.Id = h.OrderId
+                    INNER JOIN Restaurants r ON r.Id = o.RestaurantId
+                    WHERE  ({restaurantId} IS NULL OR o.RestaurantId = {restaurantId})
                 )
-                SELECT t.RestaurantId,
-                       t.RestaurantName,
-                       t.OldStatus,
-                       t.NewStatus,
-                       t.AvgSegmentMinutes,
-                       ro.AvgOverallMinutes,
-                       ro.DeliveredCount
-                FROM   TransitionAverages t
-                INNER JOIN RestaurantOverall ro ON ro.RestaurantId = t.RestaurantId
-                ORDER BY t.RestaurantId, t.OldStatus
+                SELECT
+                    RestaurantId,
+                    MAX(RestaurantName)                AS RestaurantName,
+                    OldStatus,
+                    NewStatus,
+                    AVG(CAST(SegmentMinutes AS FLOAT)) AS AvgSegmentMinutes,
+                    AVG(CAST(OverallMinutes AS FLOAT)) AS AvgOverallMinutes,
+                    COUNT(DISTINCT OrderId)            AS DeliveredCount
+                FROM   Segments
+                WHERE  OverallMinutes IS NOT NULL
+                GROUP BY RestaurantId, OldStatus, NewStatus
+                ORDER BY RestaurantId, OldStatus
                 """)
             .ToListAsync();
     }

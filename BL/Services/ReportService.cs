@@ -60,13 +60,15 @@ public class ReportService : IReportService
             .GroupBy(r => new { r.RestaurantId, r.RestaurantName })
             .Select(g =>
             {
-                var first = g.First();
+                // Placed (OldStatus = 0) is the earliest transition and covers every delivered
+                // order, so its AvgOverallMinutes and DeliveredCount are restaurant-level totals.
+                var anchor = g.OrderBy(r => r.OldStatus).First();
                 return new RestaurantDeliveryEfficiencyDto
                 {
-                    RestaurantId         = g.Key.RestaurantId,
-                    RestaurantName       = g.Key.RestaurantName,
-                    DeliveredOrdersCount = first.DeliveredCount,
-                    AverageOverallMinutes = Math.Round(first.AvgOverallMinutes, 2),
+                    RestaurantId          = g.Key.RestaurantId,
+                    RestaurantName        = g.Key.RestaurantName,
+                    DeliveredOrdersCount  = anchor.DeliveredCount,
+                    AverageOverallMinutes = Math.Round(anchor.AvgOverallMinutes, 2),
                     TransitionAverages = g
                         .Select(r => new StatusTransitionAvgDto
                         {
