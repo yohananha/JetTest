@@ -10,6 +10,18 @@ public class OrderRepository : Repository<Order>, IOrderRepository
 {
     public OrderRepository(AppDbContext context) : base(context) { }
 
+    public override async Task<Order?> GetByIdAsync(int id) =>
+        await _context.Orders
+            .Include(o => o.Items)
+                .ThenInclude(i => i.Dish)
+            .FirstOrDefaultAsync(o => o.Id == id);
+
+    public override async Task<IEnumerable<Order>> GetAllAsync() =>
+        await _context.Orders
+            .Include(o => o.Items)
+                .ThenInclude(i => i.Dish)
+            .ToListAsync();
+
     public async Task<IEnumerable<Order>> GetByCustomerIdAsync(int customerId) =>
         await _context.Orders
             .Where(o => o.CustomerId == customerId)

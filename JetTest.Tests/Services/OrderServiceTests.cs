@@ -17,6 +17,7 @@ public class OrderServiceTests
     private readonly Mock<IOrderRepository> _orderRepoMock = new();
     private readonly Mock<ICustomerRepository> _customerRepoMock = new();
     private readonly Mock<IRestaurantRepository> _restaurantRepoMock = new();
+    private readonly Mock<IDishRepository> _dishRepoMock = new();
     private readonly Mock<ILogger<OrderService>> _loggerMock = new();
     private readonly AppDbContext _context;
     private readonly OrderService _sut;
@@ -31,6 +32,7 @@ public class OrderServiceTests
             _orderRepoMock.Object,
             _customerRepoMock.Object,
             _restaurantRepoMock.Object,
+            _dishRepoMock.Object,
             _context,
             _loggerMock.Object);
     }
@@ -101,6 +103,50 @@ public class OrderServiceTests
         _restaurantRepoMock.Setup(r => r.GetByIdAsync(99)).ReturnsAsync((Restaurant?)null);
 
         var dto = new CreateOrderDto { CustomerId = 1, RestaurantId = 99, DeliveryAddress = "Addr" };
+        await _sut.Invoking(s => s.CreateAsync(dto))
+            .Should().ThrowAsync<NotFoundException>();
+    }
+
+    [Fact]
+    public async Task Create_WithItems_SnapshotsUnitPriceAndAttachesItems()
+    {
+        _customerRepoMock.Setup(r => r.GetByIdAsync(1)).ReturnsAsync(new Customer { Id = 1 });
+        _restaurantRepoMock.Setup(r => r.GetByIdAsync(2)).ReturnsAsync(new Restaurant { Id = 2 });
+        _dishRepoMock.Setup(r => r.GetByIdAsync(5))
+            .ReturnsAsync(new Dish { Id = 5, Name = "Pizza", Price = 42.50m });
+        _orderRepoMock.Setup(r => r.CreateAsync(It.IsAny<Order>()))
+            .ReturnsAsync((Order o) => { o.Id = 10; return o; });
+
+        var dto = new CreateOrderDto
+        {
+            CustomerId = 1,
+            RestaurantId = 2,
+            DeliveryAddress = "123 St",
+            Items = new() { new CreateOrderItemDto { DishId = 5, Quantity = 3 } }
+        };
+        var result = await _sut.CreateAsync(dto);
+
+        result.Items.Should().HaveCount(1);
+        result.Items[0].DishId.Should().Be(5);
+        result.Items[0].DishName.Should().Be("Pizza");
+        result.Items[0].Quantity.Should().Be(3);
+        result.Items[0].UnitPrice.Should().Be(42.50m);
+    }
+
+    [Fact]
+    public async Task Create_InvalidDishId_ThrowsNotFoundException()
+    {
+        _customerRepoMock.Setup(r => r.GetByIdAsync(1)).ReturnsAsync(new Customer { Id = 1 });
+        _restaurantRepoMock.Setup(r => r.GetByIdAsync(2)).ReturnsAsync(new Restaurant { Id = 2 });
+        _dishRepoMock.Setup(r => r.GetByIdAsync(99)).ReturnsAsync((Dish?)null);
+
+        var dto = new CreateOrderDto
+        {
+            CustomerId = 1,
+            RestaurantId = 2,
+            DeliveryAddress = "Addr",
+            Items = new() { new CreateOrderItemDto { DishId = 99, Quantity = 1 } }
+        };
         await _sut.Invoking(s => s.CreateAsync(dto))
             .Should().ThrowAsync<NotFoundException>();
     }

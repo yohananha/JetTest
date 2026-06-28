@@ -28,4 +28,5 @@ public class Order
     public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
 
     public ICollection<OrderStatusHistory> StatusHistory { get; set; } = new List<OrderStatusHistory>();
+    public ICollection<OrderItem> Items { get; set; } = new List<OrderItem>();
 }

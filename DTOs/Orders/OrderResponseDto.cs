@@ -13,4 +13,5 @@ public class OrderResponseDto
     public string? Notes { get; set; }
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
+    public List<OrderItemResponseDto> Items { get; set; } = new();
 }

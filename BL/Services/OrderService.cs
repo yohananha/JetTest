@@ -13,6 +13,7 @@ public class OrderService : IOrderService
     private readonly IOrderRepository _repo;
     private readonly ICustomerRepository _customerRepo;
     private readonly IRestaurantRepository _restaurantRepo;
+    private readonly IDishRepository _dishRepo;
     private readonly AppDbContext _context;
     private readonly ILogger<OrderService> _logger;
 
@@ -20,12 +21,14 @@ public class OrderService : IOrderService
         IOrderRepository repo,
         ICustomerRepository customerRepo,
         IRestaurantRepository restaurantRepo,
+        IDishRepository dishRepo,
         AppDbContext context,
         ILogger<OrderService> logger)
     {
         _repo = repo;
         _customerRepo = customerRepo;
         _restaurantRepo = restaurantRepo;
+        _dishRepo = dishRepo;
         _context = context;
         _logger = logger;
     }
@@ -60,8 +63,23 @@ public class OrderService : IOrderService
             Notes = dto.Notes
         };
 
+        foreach (var itemDto in dto.Items)
+        {
+            var dish = await _dishRepo.GetByIdAsync(itemDto.DishId)
+                ?? throw new NotFoundException($"Dish {itemDto.DishId} not found");
+
+            order.Items.Add(new OrderItem
+            {
+                DishId = dish.Id,
+                Dish = dish,
+                Quantity = itemDto.Quantity,
+                UnitPrice = dish.Price // snapshot price at order time
+            });
+        }
+
         var created = await _repo.CreateAsync(order);
-        _logger.LogInformation("Created order {Id} for customer {CustomerId}", created.Id, created.CustomerId);
+        _logger.LogInformation("Created order {Id} for customer {CustomerId} with {ItemCount} item(s)",
+            created.Id, created.CustomerId, created.Items.Count);
         return MapToDto(created);
     }
 
@@ -140,6 +158,13 @@ public class OrderService : IOrderService
         DeliveryAddress = o.DeliveryAddress,
         Notes = o.Notes,
         CreatedAt = o.CreatedAt,
-        UpdatedAt = o.UpdatedAt
+        UpdatedAt = o.UpdatedAt,
+        Items = o.Items.Select(i => new OrderItemResponseDto
+        {
+            DishId = i.DishId,
+            DishName = i.Dish?.Name ?? string.Empty,
+            Quantity = i.Quantity,
+            UnitPrice = i.UnitPrice
+        }).ToList()
     };
 }

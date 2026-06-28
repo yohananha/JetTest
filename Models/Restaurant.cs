@@ -23,4 +23,5 @@ public class Restaurant
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
     public ICollection<Order> Orders { get; set; } = new List<Order>();
+    public ICollection<Dish> Dishes { get; set; } = new List<Dish>();
 }

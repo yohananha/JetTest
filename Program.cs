@@ -18,12 +18,18 @@ builder.Services.AddScoped<ICustomerRepository, CustomerRepository>();
 builder.Services.AddScoped<IRestaurantRepository, RestaurantRepository>();
 builder.Services.AddScoped<IDeliveryDriverRepository, DeliveryDriverRepository>();
 builder.Services.AddScoped<IOrderRepository, OrderRepository>();
+builder.Services.AddScoped<ICategoryRepository, CategoryRepository>();
+builder.Services.AddScoped<IDishRepository, DishRepository>();
+builder.Services.AddScoped<IReportRepository, ReportRepository>();
 
 // BL
 builder.Services.AddScoped<ICustomerService, CustomerService>();
 builder.Services.AddScoped<IRestaurantService, RestaurantService>();
 builder.Services.AddScoped<IDeliveryDriverService, DeliveryDriverService>();
 builder.Services.AddScoped<IOrderService, OrderService>();
+builder.Services.AddScoped<ICategoryService, CategoryService>();
+builder.Services.AddScoped<IDishService, DishService>();
+builder.Services.AddScoped<IReportService, ReportService>();
 
 var app = builder.Build();
 

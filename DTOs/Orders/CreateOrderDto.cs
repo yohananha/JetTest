@@ -15,4 +15,6 @@ public class CreateOrderDto
 
     [MaxLength(500)]
     public string? Notes { get; set; }
+
+    public List<CreateOrderItemDto> Items { get; set; } = new();
 }
