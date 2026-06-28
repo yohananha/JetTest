@@ -4,6 +4,7 @@ using JetTest.DAL.Interfaces;
 using JetTest.DAL.Repositories;
 using JetTest.Data;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -41,5 +42,18 @@ if (app.Environment.IsDevelopment())
 app.UseHttpsRedirection();
 app.UseAuthorization();
 app.MapControllers();
+
+if (app.Environment.IsDevelopment())
+{
+    try
+    {
+        await DataSeeder.SeedAsync(app.Services);
+    }
+    catch (Exception ex)
+    {
+        var logger = app.Services.GetRequiredService<ILogger<Program>>();
+        logger.LogWarning(ex, "Data seeder skipped or failed — continuing startup.");
+    }
+}
 
 app.Run();
